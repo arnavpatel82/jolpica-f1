@@ -9,12 +9,19 @@ from jolpica.schemas.f1_api.alpha import (
     DetailMetadata,
     DetailResponse,
     RetrievedScheduleDetail,
+    RetrievedSessionDetail,
     ScheduleDetail,
     ScheduleSummary,
+    SessionSummary,
 )
 
 from .pagination import StandardMetadataPagination
-from .serializers import SeasonScheduleDetailSerializer, SeasonScheduleSerializer
+from .serializers import (
+    SeasonScheduleDetailSerializer,
+    SeasonScheduleSerializer,
+    SessionDetailSerializer,
+    SessionListSerializer,
+)
 
 
 @extend_schema_view(
@@ -101,7 +108,8 @@ class SeasonScheduleViewSet(viewsets.ReadOnlyModelViewSet):
                         "sessions", queryset=f1.Session.objects.order_by("date", "time"), to_attr="prefetched_sessions"
                     )
                 )
-                .select_related("circuit")  # Added select_related here for fallback
+                # Added select_related here for fallback
+                .select_related("circuit")
             )
         )
         last_valid_previous_index = -1
@@ -179,3 +187,68 @@ class SeasonScheduleViewSet(viewsets.ReadOnlyModelViewSet):
         data = ScheduleDetail.model_validate(serializer.data)
         metadata = DetailMetadata(timestamp=timezone.now())
         return response.Response(DetailResponse(metadata=metadata, data=data).model_dump(mode="json"))
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List all F1 Session Results",
+        description="Provides a paginated list of all available F1 sessions with links to their detailed results.",
+        responses={200: SessionSummary},
+    ),
+    retrieve=extend_schema(
+        summary="Get F1 Session Results",
+        description=(
+            "Provides detailed results for a specific F1 session, including position, timing, "
+            "and driver/team information."
+        ),
+        responses={200: RetrievedSessionDetail},
+    ),
+)
+class SessionResultViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint that allows viewing F1 session results.
+    List view provides basic session information with links to details.
+    Detail view includes full results with timing and classification data.
+    Uses standard metadata/data response format. (Alpha Version)
+    """
+
+    permission_classes = [permissions.AllowAny]
+    pagination_class = StandardMetadataPagination
+
+    def get_queryset(self):
+        queryset = f1.Session.objects.filter(session_entries__isnull=False).distinct()
+
+        if self.action == "retrieve":
+            # Full prefetch for detail view
+            return (
+                queryset.select_related("round__circuit", "round__season")
+                .prefetch_related(
+                    Prefetch(
+                        "session_entries",
+                        queryset=(
+                            f1.SessionEntry.objects.select_related(
+                                "round_entry__team_driver__driver",
+                                "round_entry__team_driver__team",
+                                "round_entry__round",
+                            )
+                            .prefetch_related("laps")
+                            .order_by("position", "-points")
+                        ),
+                    )
+                )
+                .order_by("-date", "-time")
+            )
+
+        # Simplified queryset for list view
+        return queryset.select_related("round__circuit", "round__season").order_by("-date", "-time")
+
+    def get_serializer_class(self):
+        if self.action == "retrieve":
+            return SessionDetailSerializer
+        return SessionListSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        metadata = DetailMetadata(timestamp=timezone.now())
+        return response.Response(DetailResponse(metadata=metadata, data=serializer.data).model_dump(mode="json"))
